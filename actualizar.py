@@ -54,7 +54,13 @@ def base64_to_a32(b64):
     count = len(data) // 4
     return list(struct.unpack(f'>{count}I', data[:count*4]))
 
-def decrypt_attr(attr_bytes, key):
+def b64_to_bytes(b64):
+    """Decodifica base64 de MEGA a bytes."""
+    b64 = b64.replace('-', '+').replace('_', '/')
+    b64 += '=' * ((4 - len(b64) % 4) % 4)
+    return base64.b64decode(b64)
+
+def decrypt_attr(attr_bytes, node_key_bytes):
     """Descifra los atributos de un nodo MEGA."""
     try:
         from Crypto.Cipher import AES
@@ -62,50 +68,29 @@ def decrypt_attr(attr_bytes, key):
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pycryptodome", "-q"])
         from Crypto.Cipher import AES
 
-    k = struct.pack('>4I', key[0], key[1], key[2], key[3])
-    cipher = AES.new(k, AES.MODE_CBC, iv=b'\x00'*16)
+    cipher = AES.new(node_key_bytes, AES.MODE_CBC, iv=b'\x00'*16)
     decrypted = cipher.decrypt(attr_bytes)
     try:
-        text = decrypted.decode('utf-8', errors='ignore')
-        text = text.rstrip('\x00')
-        match = re.search(r'MEGA\{"(.+?)\}', text)
+        text = decrypted.decode('utf-8', errors='ignore').rstrip('\x00')
+        match = re.search(r'MEGA(\{.+?\})', text)
         if match:
-            return json.loads('{"' + match.group(1) + '}')
-        match2 = re.search(r'MEGA(\{.+\})', text)
-        if match2:
-            return json.loads(match2.group(1))
+            return json.loads(match.group(1))
     except Exception:
         pass
     return {}
 
-def obtener_clave_nodo(node_key_b64, folder_key_a32):
-    """Descifra la clave de un nodo usando la clave de la carpeta."""
-    node_key = base64_to_a32(node_key_b64)
-    # Extraer la parte relevante (últimos 8 enteros para archivos)
-    if len(node_key) >= 8:
-        enc_key = node_key[:8]
+def obtener_clave_nodo(node_key_b64, folder_key_bytes):
+    """Descifra la clave de un nodo usando la clave de la carpeta (bytes)."""
+    from Crypto.Cipher import AES
+    enc_bytes = b64_to_bytes(node_key_b64)
+    cipher = AES.new(folder_key_bytes, AES.MODE_ECB)
+    if len(enc_bytes) >= 32:
+        dec1 = cipher.decrypt(enc_bytes[:16])
+        dec2 = cipher.decrypt(enc_bytes[16:32])
+        return bytes(a ^ b for a, b in zip(dec1, dec2))
     else:
-        enc_key = node_key
+        return cipher.decrypt(enc_bytes[:16])
 
-    # XOR con la clave de carpeta (repetida si es necesaria)
-        # Descifrar con AES-ECB
-    try:
-        from Crypto.Cipher import AES
-        folder_key_bytes = struct.pack('>4I', *folder_key_a32[:4])
-        cipher = AES.new(folder_key_bytes, AES.MODE_ECB)
-        
-        if len(enc_key) >= 8:
-            # Para archivos: dos bloques de 4
-            k1 = struct.pack('>4I', enc_key[0]^enc_key[4], enc_key[1]^enc_key[5],
-                                   enc_key[2]^enc_key[6], enc_key[3]^enc_key[7])
-            dec = cipher.decrypt(k1)
-            return list(struct.unpack('>4I', dec))
-        else:
-            k1 = struct.pack('>4I', *enc_key[:4])
-            dec = cipher.decrypt(k1)
-            return list(struct.unpack('>4I', dec))
-    except Exception as e:
-        return folder_key_a32[:4]
 
 def obtener_nodos_mega(folder_id, folder_key_a32):
     """Obtiene todos los nodos de la carpeta MEGA."""
@@ -142,16 +127,17 @@ def generar_enlace_pdf(folder_id, folder_key_b64, file_id, file_key_a32):
 
 def listar_pdfs_mega(folder_id, folder_key_b64):
     """Lista todos los PDFs de la carpeta MEGA con sus metadatos."""
+    folder_key_bytes = b64_to_bytes(folder_key_b64)
     folder_key_a32 = base64_to_a32(folder_key_b64)
     nodos = obtener_nodos_mega(folder_id, folder_key_a32)
-    
+
     if not nodos:
         print("  ⚠ No se encontraron nodos en MEGA.")
         return []
 
     nodo_por_id, hijos = construir_arbol(nodos, folder_id)
-    
-    # Encontrar nodo raíz: es la carpeta cuyo padre NO existe en la lista
+
+    # Encontrar nodo raíz: carpeta cuyo padre NO existe en la lista
     todos_ids = {n['h'] for n in nodos}
     raiz_id = None
     for n in nodos:
@@ -159,7 +145,6 @@ def listar_pdfs_mega(folder_id, folder_key_b64):
             raiz_id = n['h']
             break
     if not raiz_id:
-        # Fallback: primera carpeta de tipo 1
         for n in nodos:
             if n.get('t') == 1:
                 raiz_id = n['h']
@@ -174,10 +159,11 @@ def listar_pdfs_mega(folder_id, folder_key_b64):
             nodo = nodo_por_id.get(hijo_id)
             if not nodo:
                 continue
-            
+
             tipo = nodo.get('t', 0)
             key_raw = nodo.get('k', '')
-            # Buscar la clave cifrada con la clave de carpeta raiz
+
+            # Buscar la clave cifrada con la clave de carpeta raíz
             key_b64 = ''
             for parte in key_raw.split('/'):
                 if ':' in parte:
@@ -194,13 +180,11 @@ def listar_pdfs_mega(folder_id, folder_key_b64):
             nombre = f"nodo_{hijo_id}"
             if key_b64:
                 try:
-                    node_key = obtener_clave_nodo(key_b64, folder_key_a32)
+                    node_key_bytes = obtener_clave_nodo(key_b64, folder_key_bytes)
                     attr_b64 = nodo.get('a', '')
                     if attr_b64:
-                        attr_b64 = attr_b64.replace('-', '+').replace('_', '/')
-                        padding = (4 - len(attr_b64) % 4) % 4
-                        attr_bytes = base64.b64decode(attr_b64 + '='*padding)
-                        attrs = decrypt_attr(attr_bytes, node_key)
+                        attr_bytes = b64_to_bytes(attr_b64)
+                        attrs = decrypt_attr(attr_bytes, node_key_bytes)
                         nombre = attrs.get('n', nombre)
                 except Exception:
                     pass
@@ -223,6 +207,7 @@ def listar_pdfs_mega(folder_id, folder_key_b64):
 
     recorrer(raiz_id, '')
     return pdfs
+
 
 def extraer_miniatura(url_pdf, nombre_archivo, carpeta_miniaturas):
     """Descarga el PDF y extrae la primera página como imagen."""
@@ -335,18 +320,30 @@ def main():
         return
 
     print(f"▶ Procesando {len(nuevos)} diseño(s) nuevo(s)...\n")
+    print(f"▶ Procesando {len(nuevos)} diseño(s) nuevo(s)...\n")
 
-    for pdf in nuevos:
-        print(f"  {'─'*45}")
-        
+    # Preguntar modo de clasificación
+    print("  ¿Cómo quieres clasificar los nuevos diseños?")
+    print("    1. Uno a uno ahora")
+    print("    2. Saltar todos (quedan como Sin clasificar)")
+    modo = input("  Elige (1 o 2): ").strip()
+    clasificar_ahora = (modo == "1")
+    print()
+
+    for i, pdf in enumerate(nuevos, 1):
+        print(f"  [{i}/{len(nuevos)}] {pdf['nombre']}")
+
         # Extraer miniatura
         ruta_mini = extraer_miniatura(pdf['url_pdf'], pdf['id'], CARPETA_MINIATURAS)
         if ruta_mini:
             pdf['miniatura'] = ruta_mini.replace('\\', '/')
-        
-        # Pedir tipo y observaciones
-        pdf['tipo'] = pedir_tipo(pdf['nombre'])
-        pdf['observaciones'] = pedir_observaciones(pdf['nombre'])
+
+        if clasificar_ahora:
+            pdf['tipo'] = pedir_tipo(pdf['nombre'])
+            pdf['observaciones'] = pedir_observaciones(pdf['nombre'])
+        else:
+            pdf['tipo'] = 'Sin clasificar'
+            pdf['observaciones'] = ''
         pdf['nuevo'] = True
 
     # Marcar los anteriores como no-nuevos
