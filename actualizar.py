@@ -151,12 +151,19 @@ def listar_pdfs_mega(folder_id, folder_key_b64):
 
     nodo_por_id, hijos = construir_arbol(nodos, folder_id)
     
-    # Encontrar nodo raíz
+    # Encontrar nodo raíz: es la carpeta cuyo padre NO existe en la lista
+    todos_ids = {n['h'] for n in nodos}
     raiz_id = None
     for n in nodos:
-        if n.get('t') == 1:  # tipo 1 = carpeta raíz del share
+        if n.get('t') == 1 and n.get('p', '') not in todos_ids:
             raiz_id = n['h']
             break
+    if not raiz_id:
+        # Fallback: primera carpeta de tipo 1
+        for n in nodos:
+            if n.get('t') == 1:
+                raiz_id = n['h']
+                break
     if not raiz_id and nodos:
         raiz_id = nodos[0]['h']
 
