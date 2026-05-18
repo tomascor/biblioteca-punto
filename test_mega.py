@@ -1,6 +1,15 @@
-import requests, json
+import requests, json, base64, struct
 
 folder_id = 'NotjiSyL'
+folder_key_b64 = 'GuuK9sPFOZlllkxQsFQmhQ'
+
+def base64_to_a32(b64):
+    b64 = b64.replace('-', '+').replace('_', '/')
+    padding = (4 - len(b64) % 4) % 4
+    b64 += '=' * padding
+    data = base64.b64decode(b64)
+    count = len(data) // 4
+    return list(struct.unpack(f'>{count}I', data[:count*4]))
 
 resp = requests.post(
     f'https://g.api.mega.co.nz/cs?id=0&n={folder_id}',
@@ -9,17 +18,29 @@ resp = requests.post(
     timeout=30
 )
 nodos = resp.json()[0].get('f', [])
-print('Total nodos:', len(nodos))
+todos_ids = {n['h'] for n in nodos}
 
-# Mostrar todos los tipos
-tipos = {}
+# Encontrar raíz
+raiz_id = None
 for n in nodos:
-    t = n.get('t', 0)
-    tipos[t] = tipos.get(t, 0) + 1
-print('Conteo por tipo:', tipos)
+    if n.get('t') == 1 and n.get('p', '') not in todos_ids:
+        raiz_id = n['h']
+        break
 
-# Mostrar primeros 5 nodos tipo 1 (carpetas)
-print('\nPrimeras carpetas:')
-carpetas = [n for n in nodos if n.get('t') == 1]
-for c in carpetas[:5]:
-    print(json.dumps(c, indent=2))
+print(f'Raíz encontrada: {raiz_id}')
+
+# Contar hijos directos de la raíz
+hijos_raiz = [n for n in nodos if n.get('p') == raiz_id]
+print(f'Hijos directos de la raíz: {len(hijos_raiz)}')
+
+# Mostrar un archivo (t=0) de ejemplo
+archivos = [n for n in nodos if n.get('t') == 0]
+print(f'\nTotal archivos: {len(archivos)}')
+print('Ejemplo de archivo:')
+print(json.dumps(archivos[0], indent=2))
+
+# Intentar descifrar el nombre del primer archivo
+from Crypto.Cipher import AES
+
+folder_key = base64_to_a32(folder_key_b64)
+n = archivos[0]

@@ -176,9 +176,19 @@ def listar_pdfs_mega(folder_id, folder_key_b64):
                 continue
             
             tipo = nodo.get('t', 0)
-            key_b64 = nodo.get('k', '')
-            if ':' in key_b64:
-                key_b64 = key_b64.split(':')[1]
+            key_raw = nodo.get('k', '')
+            # Buscar la clave cifrada con la clave de carpeta raiz
+            key_b64 = ''
+            for parte in key_raw.split('/'):
+                if ':' in parte:
+                    kid, kval = parte.split(':', 1)
+                    if kid == raiz_id:
+                        key_b64 = kval
+                        break
+            if not key_b64:
+                for parte in key_raw.split('/'):
+                    if ':' in parte:
+                        key_b64 = parte.split(':', 1)[1]
 
             # Descifrar nombre
             nombre = f"nodo_{hijo_id}"
